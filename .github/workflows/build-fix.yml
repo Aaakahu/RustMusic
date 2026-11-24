@@ -41,8 +41,8 @@ jobs:
         # 裸 cargo build --release 的产物会去连 devUrl localhost:1420，
         # 表现为 WebView 报 ERR_CONNECTION_REFUSED（Cargo.toml [features]
         # 注释里上游自己就警告过这一点）。--bundles none = 只出裸 exe
-        # 不打安装包
-        run: npx tauri build --bundles none
+        # 不打安装包：--no-bundle（这版 CLI 不认 --bundles none）
+        run: npx tauri build --no-bundle
 
       - uses: actions/upload-artifact@v4
         with:
