@@ -235,10 +235,13 @@ impl Engine {
                 // 在线曲已改道 stream-stale；seek 会把这里的信息提示给用户
                 let (_, _, _, failed) = shared.snapshot();
                 if failed {
+                    // pick<T> 泛型恒等：字面量推出 &'static str，Err 要 String，
+                    // 这里 into() 收口
                     return Err(crate::i18n::pick(
                         "在线缓存已失效，请重新播放该曲目",
                         "Stream cache invalidated, please replay this track",
-                    ));
+                    )
+                    .into());
                 }
                 if shared.is_mp4() {
                     return crate::symdec::SymphoniaSource::open_streaming(shared, skip_ms)
