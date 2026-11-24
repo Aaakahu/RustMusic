@@ -36,6 +36,8 @@ mod taskbar_lyric;
 #[path = "taskbar_lyric_stub.rs"]
 mod taskbar_lyric;
 mod webview_suspend;
+#[cfg(windows)]
+mod win_move_fix;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -227,6 +229,10 @@ fn main() {
                     }
                 }
             }
+            // 拖动 / 缩放起手不再卡顿（根因与做法见 win_move_fix 模块说明）；
+            // 放在 setup：此时网页视图已建好、wry 的子类已装上，本层才能排在它前面
+            #[cfg(windows)]
+            win_move_fix::install(&handle);
             let app_data = handle.path().app_data_dir().map_err(|e| e.to_string())?;
             std::fs::create_dir_all(app_data.join("covers")).map_err(|e| e.to_string())?;
             std::fs::create_dir_all(app_data.join("downloads")).map_err(|e| e.to_string())?;

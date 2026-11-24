@@ -72,6 +72,14 @@ pub async fn exit_mini_mode(app: AppHandle) -> Result<(), String> {
             let _ = w.center();
             let _ = w.set_min_size(Some(tauri::LogicalSize::new(1000.0, 660.0)));
         }
+        // 兜底尺寸 1280×880 在 1280×800 这类小屏上会四角出屏；记忆尺寸换了
+        // 显示器后也可能出屏。非最大化时裁进工作区（最大化的窗口不能动尺寸）
+        #[cfg(windows)]
+        {
+            if !w.is_maximized().unwrap_or(false) {
+                clamp_main_into_work_area(&w);
+            }
+        }
         // 还原后的几何收口落盘（防抖）：main_geom 与 main_prev_geom 分开记，
         // 互不污染
         schedule_persist_main_geom(&app);
@@ -403,29 +411,79 @@ pub(crate) fn schedule_persist_dlyrics_geom(app: &AppHandle) {
 
 // ---------- 主窗口几何记忆 ----------
 
-/// 迷你小窗标志：迷你模式下窗口是 360×118 小窗，Moved/Resized 的几何
-/// 落盘必须跳过（否则下次启动会按迷你尺寸开窗）。enter/exit_mini_mode 翻转
-/// （AppState.mini_mode）
+/// Windows 对最小化窗口回报的位置坐标（哨兵值）：这不是用户认知的窗口位置，
+/// 绝不能落盘
+const MINIMIZED_SENTINEL: i32 = -32000;
 
-/// 立即把主窗口几何存进设置表（物理像素 "x,y,w,h"）。
-/// 迷你模式与最大化状态不存：迷你窗口尺寸不是主窗口几何；
-/// 最大化尺寸存下来还原会盖掉用户上次的窗口大小
+/// 设置表里的主窗口几何记录："x,y,逻辑宽,逻辑高,是否最大化"。位置存物理像素
+/// （与显示器一一对应），尺寸存逻辑像素（换缩放比例的屏幕时观感大小不变），
+/// 与官方 tauri-plugin-window-state 的存法一致。四段式旧记录（物理尺寸）不认
+fn parse_main_geom(s: &str) -> Option<(i32, i32, f64, f64, bool)> {
+    let p: Vec<&str> = s.split(',').collect();
+    if p.len() != 5 {
+        return None;
+    }
+    let (x, y, lw, lh, max) = (
+        p[0].trim().parse::<i32>().ok()?,
+        p[1].trim().parse::<i32>().ok()?,
+        p[2].trim().parse::<f64>().ok()?,
+        p[3].trim().parse::<f64>().ok()?,
+        p[4].trim().parse::<f64>().ok()? > 0.5,
+    );
+    // 脏数据拦截：最小化哨兵坐标、琐碎尺寸（还原时会被系统抬到最小尺寸，
+    // 开出来就是一个贴在角落的最小窗口）
+    let sane = x > MINIMIZED_SENTINEL
+        && y > MINIMIZED_SENTINEL
+        && (300.0..=20000.0).contains(&lw)
+        && (200.0..=20000.0).contains(&lh);
+    sane.then_some((x, y, lw, lh, max))
+}
+
+/// 立即把主窗口几何存进设置表。以下状态一律不存——守卫口径照搬官方
+/// tauri-plugin-window-state（注释原话 "Don't store minimized state"）：
+/// - 迷你模式：360×118 小窗不是主窗口几何
+/// - 最小化：outer_position 是 (-32000,-32000)，尺寸缩成图标条
+/// - 全屏：占满显示器的尺寸同理
+/// - 已隐藏（在托盘里）：隐藏前的几何在隐藏那一刻已经同步存过
+/// 最大化时只更新标志位，位置尺寸沿用上次记录的还原几何
 pub(crate) fn persist_main_geom(app: &AppHandle) {
     let Some(w) = app.get_webview_window("main") else {
         return;
     };
-    if app.state::<AppState>().mini_mode.load(Ordering::SeqCst) {
+    let st = app.state::<AppState>();
+    if st.mini_mode.load(Ordering::SeqCst) {
         return;
     }
-    if w.is_maximized().unwrap_or(false) {
+    if w.is_minimized().unwrap_or(false)
+        || w.is_fullscreen().unwrap_or(false)
+        || !w.is_visible().unwrap_or(true)
+    {
         return;
     }
-    if let (Ok(pos), Ok(size)) = (w.outer_position(), w.outer_size()) {
-        let geom = format!("{},{},{},{}", pos.x, pos.y, size.width, size.height);
-        let st = app.state::<AppState>();
+    let value = if w.is_maximized().unwrap_or(false) {
         let conn = st.db.lock();
-        let _ = db::set_setting(&conn, "main_geom", &geom);
-    }
+        match db::get_setting(&conn, "main_geom").and_then(|s| parse_main_geom(&s)) {
+            // 没有可信的还原几何可沿用：维持不落盘
+            None => return,
+            Some((x, y, lw, lh, _)) => format!("{x},{y},{lw},{lh},1"),
+        }
+    } else {
+        let (Ok(pos), Ok(size)) = (w.outer_position(), w.outer_size()) else {
+            return;
+        };
+        // 双保险：个别时序下 is_minimized 尚未翻转，位置却已是哨兵值
+        if pos.x <= MINIMIZED_SENTINEL || pos.y <= MINIMIZED_SENTINEL {
+            return;
+        }
+        let scale = w.scale_factor().unwrap_or(1.0);
+        let (lw, lh) = (size.width as f64 / scale, size.height as f64 / scale);
+        if !(lw.is_finite() && lh.is_finite()) || lw < 1.0 || lh < 1.0 {
+            return;
+        }
+        format!("{},{},{:.1},{:.1},0", pos.x, pos.y, lw, lh)
+    };
+    let conn = st.db.lock();
+    let _ = db::set_setting(&conn, "main_geom", &value);
 }
 
 /// 防抖保存主窗口几何：窗口静止 400ms 后落一次盘。拖动/缩放期间
@@ -453,28 +511,40 @@ pub(crate) fn schedule_persist_main_geom(app: &AppHandle) {
 static MAIN_GEOM_TX: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>> =
     std::sync::Mutex::new(None);
 
-/// 启动时恢复上次主窗口几何，并 clamp 进当前显示器工作区（物理像素）。
-/// 修复点：出厂默认 1280×880 比 1280×800 屏的工作区还高约 80px，首次
-/// 启动居中直接四角出屏——无记忆时同样走 clamp 兜底。仅 Windows：
-/// 工作区（避开任务栏）经 Win32 GetMonitorInfoW 取得
+/// 启动时恢复上次主窗口几何，并 clamp 进当前显示器工作区。修出厂默认
+/// 1280×880 在 1280×800 这类小屏上首次启动四角出屏；没有记录或记录不可信
+/// 时同样走 clamp 兜底。仅 Windows（工作区要经 Win32 取得）
 #[cfg(windows)]
 pub(crate) fn restore_main_geom(app: &AppHandle, conn: &rusqlite::Connection) {
+    let Some(w) = app.get_webview_window("main") else {
+        return;
+    };
+    // 先恢复记忆几何（set 尺寸在前、位置在后，与 exit_mini_mode 同序）
+    let mut want_max = false;
+    if let Some((x, y, lw, lh, is_max)) =
+        db::get_setting(conn, "main_geom").and_then(|s| parse_main_geom(&s))
+    {
+        let _ = w.set_size(tauri::LogicalSize::new(lw, lh));
+        let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
+        want_max = is_max;
+    }
+    clamp_main_into_work_area(&w);
+    // 最大化状态最后恢复：先摆好还原尺寸，取消最大化时才回得到那里
+    if want_max {
+        let _ = w.maximize();
+    }
+}
+
+/// 把主窗口裁进它所在显示器的工作区：尺寸不超过工作区（避开任务栏），位置
+/// 保证至少留一段在屏内可拖回。出厂默认 1280×880 这类比屏幕还大的窗口由此
+/// 兜底。调用方保证窗口此时不是最大化 / 全屏状态
+#[cfg(windows)]
+fn clamp_main_into_work_area(w: &tauri::WebviewWindow) {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
     };
 
-    let Some(w) = app.get_webview_window("main") else {
-        return;
-    };
-    // 先恢复记忆几何（set 尺寸在前、位置在后，与 exit_mini_mode 同序）
-    if let Some(s) = db::get_setting(conn, "main_geom") {
-        let p: Vec<i64> = s.split(',').filter_map(|v| v.parse().ok()).collect();
-        if p.len() == 4 {
-            let _ = w.set_size(tauri::PhysicalSize::new(p[2].max(1) as u32, p[3].max(1) as u32));
-            let _ = w.set_position(tauri::PhysicalPosition::new(p[0] as i32, p[1] as i32));
-        }
-    }
     let Ok(hwnd) = w.hwnd() else {
         return;
     };

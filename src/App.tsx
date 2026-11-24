@@ -397,10 +397,12 @@ export default function App() {
         <div className="relative flex flex-1 min-h-0">
           <Sidebar />
 
-          {/* 内容区最小宽度兜底：三个列表页头部（标题块 + 420px 搜索框 +
-              播放按钮组）固有宽度 ~880px，被压更窄时标题会挤成竖排换行；
-              列表页头部另有 flex-wrap 优雅降级。窗口更窄时这里横向滚动兜底 */}
-          <main className="flex-1 min-w-[880px] min-h-0 flex flex-col relative overflow-x-auto">
+          {/* 内容区最小宽度兜底：取列表网格的固有最小宽度（52+200+130+104+116
+              + 间距 64 + 内边距 48 ≈ 714px）。此前写死 880px 是按工具栏单行
+              排开的宽度——窗口最小宽 1000 减去侧栏后只剩 ~764px，内容区被迫
+              比窗口还宽，右侧工具栏和搜索框直接被裁掉；现在工具栏在窄宽度下
+              换行（见各列表页头部），这里只在比网格还窄时横向滚动兜底 */}
+          <main className="flex-1 min-w-[720px] min-h-0 flex flex-col relative overflow-x-auto">
             <div key={view + viewParam} className="flex-1 min-h-0 flex flex-col anim-view">
               {view === "library" && <LibraryView mode="library" />}
               {view === "liked" && <LibraryView mode="liked" />}

@@ -582,8 +582,10 @@ export default function LibraryView({ mode }: { mode: Mode }) {
           </div>
         </div>
 
-        {/* 统一控制栏：播放全部、随机、批量管理在最前，排序居中，搜索框靠右并保同一行 */}
-        <div className="flex items-center gap-2 mt-3.5 w-full flex-nowrap min-w-0">
+        {/* 统一控制栏：播放全部、随机、批量管理在最前，排序居中，搜索框靠右并保同一行。
+            容器宽于 860px 时保持单行原样；更窄时排序组整组换到第二行，
+            搜索框仍留在第一行右侧——不再把右侧挤出窗口 */}
+        <div className="flex items-center gap-2 mt-3.5 w-full flex-wrap min-w-0 @container">
           {(sortedTracks.length > 0 || mergedEntries.length > 0) && (
             <>
               <button className="btn-primary shrink-0 !px-3 !py-1.5 !text-[12px]" onClick={() => playAll(false)}>
@@ -617,12 +619,12 @@ export default function LibraryView({ mode }: { mode: Mode }) {
                 {batchMode ? tr("退出批量", "Exit Batch") : tr("批量管理", "Batch")}
               </button>
 
-              <div className="w-px h-4 bg-[var(--line)] mx-0.5 shrink-0" />
+              <div className="w-px h-4 bg-[var(--line)] mx-0.5 shrink-0 @max-[860px]:hidden" />
             </>
           )}
 
           {/* 排序标签 */}
-          <div className="flex items-center gap-1 shrink-0 flex-nowrap">
+          <div className="flex items-center gap-1 shrink-0 flex-nowrap @max-[860px]:order-last @max-[860px]:basis-full">
             <span className="text-[11px] text-[var(--ink-3)] mr-0.5 shrink-0">
               {tr("排序", "Sort")}
             </span>
