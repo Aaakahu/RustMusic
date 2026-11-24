@@ -15,11 +15,24 @@ export default function Titlebar() {
 
   useEffect(() => {
     let disposed = false;
+    let un: (() => void) | undefined;
+    let t: number | undefined;
     win.isMaximized().then((m) => {
       if (!disposed) setMaximized(m);
     });
-    let un: (() => void) | undefined;
-    const p = win.onResized(async () => setMaximized(await win.isMaximized()));
+    // 拖动/缩放窗口期间 onResized 连发：150ms 去抖只查一次，且结果没变
+    //（普通拖动位置）不再触发 re-render——此前每帧一次 isMaximized IPC
+    // 是拖拽掉帧的来源之一
+    const p = win.onResized(() => {
+      if (t != null) return;
+      t = window.setTimeout(() => {
+        t = undefined;
+        if (disposed) return;
+        win.isMaximized().then((m) => {
+          if (!disposed) setMaximized((prev) => (prev === m ? prev : m));
+        });
+      }, 150);
+    });
     p.then((u) => {
       // 组件可能已在 promise resolve 前卸载（StrictMode 双挂载），避免泄漏监听器
       if (disposed) u();
@@ -27,6 +40,7 @@ export default function Titlebar() {
     });
     return () => {
       disposed = true;
+      if (t != null) window.clearTimeout(t);
       if (un) un();
     };
   }, []);

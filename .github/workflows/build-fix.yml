@@ -1,0 +1,47 @@
+name: Build Windows (fix)
+
+# fix 分支的窗口体验修复构建：只出 Windows x64 裸 exe（个人替换
+# 安装目录里的 rustmusic.exe 即用），不打安装包、不碰 Release
+
+on:
+  push:
+    branches: ["fix/window-pain-points"]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # 先构建前端（tauri 上下文在编译期嵌入 dist）
+      - name: 前端类型检查 + 构建
+        run: |
+          npm ci
+          npm run build
+
+      # 与上游 CI 同一套测试口径，保证 --locked 下 Cargo.lock 一致
+      - name: Rust 单元测试
+        working-directory: src-tauri
+        run: cargo test --bin rustmusic --locked
+
+      - name: 构建 release exe
+        working-directory: src-tauri
+        run: cargo build --release --bin rustmusic
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rustmusic-windows-x64
+          path: src-tauri/target/release/rustmusic.exe
+          if-no-files-found: error

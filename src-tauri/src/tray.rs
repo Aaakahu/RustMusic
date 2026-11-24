@@ -187,7 +187,11 @@ pub(crate) fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
             "pp" => media_control(app, "toggle", None),
             "prev" => media_control(app, "prev", None),
             "next" => media_control(app, "next", None),
-            "quit" => app.exit(0),
+            "quit" => {
+                // 托盘退出前的几何收口（防抖落盘可能还没到 400ms）
+                crate::commands::persist_main_geom(app);
+                app.exit(0);
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, ev| {

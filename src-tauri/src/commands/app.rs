@@ -6,6 +6,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::db;
 use crate::AppState;
 use std::io::Read;
+use std::sync::atomic::Ordering;
 /// 进入迷你小窗模式：记录原窗口尺寸位置，窗口缩为紧凑小窗
 #[tauri::command]
 pub async fn enter_mini_mode(app: AppHandle) -> Result<(), String> {
@@ -14,6 +15,9 @@ pub async fn enter_mini_mode(app: AppHandle) -> Result<(), String> {
         if is_max {
             let _ = w.unmaximize();
         }
+        // 先翻迷你标志再缩窗：缩窗触发的 Moved/Resized 不落主窗口几何
+        //（否则 main_geom 会被迷你 360×118 污染，下次启动开成迷你尺寸）
+        app.state::<AppState>().mini_mode.store(true, Ordering::SeqCst);
         if let (Ok(pos), Ok(size)) = (w.outer_position(), w.outer_size()) {
             let st = app.state::<AppState>();
             let conn = st.db.lock();
@@ -39,6 +43,8 @@ pub async fn enter_mini_mode(app: AppHandle) -> Result<(), String> {
 pub async fn exit_mini_mode(app: AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.set_always_on_top(false);
+        // 先解除迷你标志：还原触发的 Moved/Resized 要正常落主窗口几何
+        app.state::<AppState>().mini_mode.store(false, Ordering::SeqCst);
 
         let saved = {
             let st = app.state::<AppState>();
@@ -66,6 +72,9 @@ pub async fn exit_mini_mode(app: AppHandle) -> Result<(), String> {
             let _ = w.center();
             let _ = w.set_min_size(Some(tauri::LogicalSize::new(1000.0, 660.0)));
         }
+        // 还原后的几何收口落盘（防抖）：main_geom 与 main_prev_geom 分开记，
+        // 互不污染
+        schedule_persist_main_geom(&app);
     }
     Ok(())
 }
@@ -390,6 +399,112 @@ pub(crate) fn schedule_persist_dlyrics_geom(app: &AppHandle) {
         });
     }
     let _ = guard.as_ref().unwrap().send(());
+}
+
+// ---------- 主窗口几何记忆 ----------
+
+/// 迷你小窗标志：迷你模式下窗口是 360×118 小窗，Moved/Resized 的几何
+/// 落盘必须跳过（否则下次启动会按迷你尺寸开窗）。enter/exit_mini_mode 翻转
+/// （AppState.mini_mode）
+
+/// 立即把主窗口几何存进设置表（物理像素 "x,y,w,h"）。
+/// 迷你模式与最大化状态不存：迷你窗口尺寸不是主窗口几何；
+/// 最大化尺寸存下来还原会盖掉用户上次的窗口大小
+pub(crate) fn persist_main_geom(app: &AppHandle) {
+    let Some(w) = app.get_webview_window("main") else {
+        return;
+    };
+    if app.state::<AppState>().mini_mode.load(Ordering::SeqCst) {
+        return;
+    }
+    if w.is_maximized().unwrap_or(false) {
+        return;
+    }
+    if let (Ok(pos), Ok(size)) = (w.outer_position(), w.outer_size()) {
+        let geom = format!("{},{},{},{}", pos.x, pos.y, size.width, size.height);
+        let st = app.state::<AppState>();
+        let conn = st.db.lock();
+        let _ = db::set_setting(&conn, "main_geom", &geom);
+    }
+}
+
+/// 防抖保存主窗口几何：窗口静止 400ms 后落一次盘。拖动/缩放期间
+/// Moved/Resized 连发，逐事件直接写库等于每像素一次 SQLite 写。
+/// 托盘退出（app.exit）不走窗口关闭路径，靠拖动后的即时落盘兜底
+pub(crate) fn schedule_persist_main_geom(app: &AppHandle) {
+    let mut guard = MAIN_GEOM_TX.lock().unwrap();
+    if guard.is_none() {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        *guard = Some(tx);
+        let app = app.clone();
+        std::thread::spawn(move || {
+            while rx.recv().is_ok() {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                // 静止窗口期内又动过：吞掉旧信号，按最后一次的位置保存
+                while rx.try_recv().is_ok() {}
+                persist_main_geom(&app);
+            }
+        });
+    }
+    let _ = guard.as_ref().unwrap().send(());
+}
+
+/// 几何持久化的防抖信号通道（与桌面歌词 dlyrics 同款模式）
+static MAIN_GEOM_TX: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>> =
+    std::sync::Mutex::new(None);
+
+/// 启动时恢复上次主窗口几何，并 clamp 进当前显示器工作区（物理像素）。
+/// 修复点：出厂默认 1280×880 比 1280×800 屏的工作区还高约 80px，首次
+/// 启动居中直接四角出屏——无记忆时同样走 clamp 兜底。仅 Windows：
+/// 工作区（避开任务栏）经 Win32 GetMonitorInfoW 取得
+#[cfg(windows)]
+pub(crate) fn restore_main_geom(app: &AppHandle, conn: &rusqlite::Connection) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+
+    let Some(w) = app.get_webview_window("main") else {
+        return;
+    };
+    // 先恢复记忆几何（set 尺寸在前、位置在后，与 exit_mini_mode 同序）
+    if let Some(s) = db::get_setting(conn, "main_geom") {
+        let p: Vec<i64> = s.split(',').filter_map(|v| v.parse().ok()).collect();
+        if p.len() == 4 {
+            let _ = w.set_size(tauri::PhysicalSize::new(p[2].max(1) as u32, p[3].max(1) as u32));
+            let _ = w.set_position(tauri::PhysicalPosition::new(p[0] as i32, p[1] as i32));
+        }
+    }
+    let Ok(hwnd) = w.hwnd() else {
+        return;
+    };
+    let mut mi = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    unsafe {
+        let hmon = MonitorFromWindow(HWND(hwnd.0 as *mut _), MONITOR_DEFAULTTONEAREST);
+        if hmon.is_invalid() || !GetMonitorInfoW(hmon, &mut mi).as_bool() {
+            return;
+        }
+    }
+    let rc = mi.rcWork;
+    let (wa_x, wa_y) = (rc.left, rc.top);
+    let (wa_w, wa_h) = (rc.right - rc.left, rc.bottom - rc.top);
+    let (Ok(pos), Ok(size)) = (w.outer_position(), w.outer_size()) else {
+        return;
+    };
+    // 尺寸裁进工作区（下限 200×200 兜极端小屏），位置保证至少可拖回
+    let new_w = (size.width as i32).min(wa_w).max(200) as u32;
+    let new_h = (size.height as i32).min(wa_h).max(200) as u32;
+    let new_x = pos.x.clamp(wa_x, wa_x + wa_w - new_w as i32);
+    let new_y = pos.y.clamp(wa_y, wa_y + wa_h - new_h as i32);
+    if new_w != size.width || new_h != size.height {
+        let _ = w.set_size(tauri::PhysicalSize::new(new_w, new_h));
+    }
+    if new_x != pos.x || new_y != pos.y {
+        let _ = w.set_position(tauri::PhysicalPosition::new(new_x, new_y));
+    }
 }
 
 /// 打开桌面歌词窗口（透明、无边框、置顶、跳过任务栏）。

@@ -70,3 +70,31 @@
   animation-play-state: paused !important;
 }
 
+
+/* ---------- 拖动窗口期间冻结所有过渡与动画 ----------
+   拖拽跟手度：拖动帧率与页面动画（VU 表、律动层、卡片过渡）抢同一份
+   渲染预算；拖动中内容全部静止，合成器全力跟窗口。html.dragging 由
+   main.tsx 在 drag-region 按下时挂上、松开/超时后摘掉 */
+html.dragging *,
+html.dragging *::before,
+html.dragging *::after {
+  transition: none !important;
+  animation-play-state: paused !important;
+}
+
+/* ---------- 应用启动入场 ----------
+   无框窗口没有系统级开窗动画，首帧直出显得生硬：整窗 400ms 淡入 +
+   2% 收放。只在启动时跑一次（托盘挂起恢复不重挂 DOM，不会重播） */
+@keyframes app-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+#root {
+  animation: app-enter 400ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}

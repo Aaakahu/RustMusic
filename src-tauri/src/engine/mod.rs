@@ -230,6 +230,16 @@ impl Engine {
         let streaming = self.active_streaming.read().clone();
         if let Some((spath, shared)) = streaming {
             if spath == path {
+                // 下载已失败：流读取器此后只会返回 EOF，复用必死；半截缓存
+                // 也不能当普通文件播（残缺音频）。报错给调用方——resume 的
+                // 在线曲已改道 stream-stale；seek 会把这里的信息提示给用户
+                let (_, _, _, failed) = shared.snapshot();
+                if failed {
+                    return Err(crate::i18n::pick(
+                        "在线缓存已失效，请重新播放该曲目",
+                        "Stream cache invalidated, please replay this track",
+                    ));
+                }
                 if shared.is_mp4() {
                     return crate::symdec::SymphoniaSource::open_streaming(shared, skip_ms)
                         .map(|s| Box::new(s) as Box<dyn Source + Send>);
@@ -348,9 +358,26 @@ impl Engine {
         self.emit_state(false);
     }
 
+    /// 清理死掉的独占会话，返回是否清理了。暂停期间曲终（EOF）/输出设备
+    /// 拔出会让会话线程退出而 active 翻 false；残留的 ctl 会让 resume/toggle
+    /// 只翻 paused 标志——表现为"界面在播、无声"的假活
+    fn clear_dead_excl(&self) -> bool {
+        let dead = self
+            .excl
+            .read()
+            .as_ref()
+            .is_some_and(|ctl| !ctl.active.load(Ordering::Relaxed));
+        if dead {
+            *self.excl.write() = None;
+        }
+        dead
+    }
+
     pub fn resume(&self) {
         // 曲目已自然播完（托盘隐藏期间"播完"事件可能丢失）：重启当前曲目，
         // 否则播放按钮会永远无响应（早期 return 既不播放也不发状态）
+        // 独占会话死在暂停期间的先清掉，别翻无效标志假装在播
+        self.clear_dead_excl();
         if self.excl_active() {
             if let Some(ctl) = self.excl.read().as_ref() {
                 ctl.paused.store(false, Ordering::Relaxed);
@@ -364,6 +391,18 @@ impl Engine {
         if self.sink.read().empty() {
             let info = self.current.read().clone();
             if let Some(info) = info {
+                // 在线曲目 sink 已空 + 用户点播放：多半是暂停期间流式下载
+                // 失败/缓存改名留下的死缓存，直接重播必死，且 play_file 的
+                // 错误在这里会被吞（按钮点了没反应，只能重启应用）。
+                // 发 stream-stale 交前端原地重播当前队列项（重新取链：命中
+                // 缓存秒开，未命中自动重下），不再静默失败
+                if info.kind != "track" {
+                    let _ = self.app.emit(
+                        "player://stream-stale",
+                        serde_json::json!({ "kind": info.kind }),
+                    );
+                    return;
+                }
                 let _ = self.play_file(info);
             }
             return;
@@ -379,6 +418,7 @@ impl Engine {
 
     pub fn toggle(&self) {
         // sink 已空（停止/自然播完）时"播放"应重启当前曲目而不是走 pause 早退
+        self.clear_dead_excl();
         if self.excl_active() {
             if self.user_paused.load(Ordering::Relaxed) {
                 self.resume();

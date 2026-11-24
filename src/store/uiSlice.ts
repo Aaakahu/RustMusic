@@ -390,6 +390,16 @@ export const createUiSlice: StateCreator<Store, [], [], Fields> = (set, get) => 
       })
     );
 
+    // 暂停期间在线流式缓存死亡（下载失败/缓存改名）：引擎侧点播放不再
+    // 静默吞错，发此事件交前端原地重播当前队列项——重新取链，命中缓存
+    // 秒开，未命中自动重下（修"暂停很久后点播放没反应，只能重启"）
+    unbinds.push(
+      await listenEvent("player://stream-stale", () => {
+        const s = get();
+        if (s.qIndex >= 0 && s.queue[s.qIndex]) get().playQueueIndex(s.qIndex);
+      })
+    );
+
     // 独占模式协商失败回退共享模式时，明确告知用户（否则无声降级难以察觉）
     unbinds.push(
       await listenEvent<{ reason: string }>("player://exclusive-fallback", (p) => {

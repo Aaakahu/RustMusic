@@ -59,6 +59,8 @@ pub struct AppState {
     pub scan_last: Mutex<serde_json::Value>,
     /// 桌面歌词是否处于鼠标穿透锁定状态
     pub dlyrics_locked: AtomicBool,
+    /// 迷你小窗模式：此状态下窗口是 360×118 小窗，主窗口几何记忆跳过落盘
+    pub mini_mode: AtomicBool,
 }
 
 /// 是否运行在虚拟机里（VMware/VirtualBox/QEMU/Hyper-V 等常见厂商）。
@@ -108,6 +110,14 @@ fn main() {
             // 只拦主窗口——桌面歌词窗口的关闭是正常功能（先存几何再关），
             // 退出路径（托盘退出）走的 app.exit，不触发 CloseRequested。
             if window.label() == "main" {
+                // 主窗口几何记忆：拖动/缩放静止 400ms 后落盘（迷你模式与
+                // 最大化状态在 persist 侧跳过）
+                if matches!(
+                    event,
+                    tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)
+                ) {
+                    commands::schedule_persist_main_geom(window.app_handle());
+                }
                 // 安全网：窗口获得焦点时若仍挂起（外部 ShowWindow 等绕过托盘
                 // 的显示路径），恢复 WebView 并补发状态，避免白屏/冻结界面
                 if let tauri::WindowEvent::Focused(true) = event {
@@ -129,6 +139,8 @@ fn main() {
                     };
                     if action == "tray" {
                         api.prevent_close();
+                        // 隐藏前收口几何：防抖落盘可能还没到 400ms
+                        commands::persist_main_geom(window.app_handle());
                         let _ = window.hide();
                         // 隐藏到托盘：挂起 WebView 回收渲染内存（音频不受影响）
                         suspend_main_webview(window.app_handle());
@@ -136,6 +148,7 @@ fn main() {
                         // exit：显式退出——托盘图标存在时默认关闭可能仅移除窗口，
                         // 进程会以无窗口状态残留在托盘
                         api.prevent_close();
+                        commands::persist_main_geom(window.app_handle());
                         app.exit(0);
                     }
                 }
@@ -226,6 +239,12 @@ fn main() {
             // 存量明文凭据迁移：settings 表 → 系统凭据管理器（成功即清库内残留）
             credentials::migrate_legacy(&conn);
 
+            // 恢复主窗口几何并 clamp 进工作区：修出厂默认 1280×880 在
+            // 1280×800 等小屏上首次启动四角出屏（无记忆时同样 clamp 兜底）。
+            // 在 db 初始化后执行才能读到 main_geom
+            #[cfg(windows)]
+            commands::restore_main_geom(&handle, &conn);
+
             // QQ 设备指纹持久化（issue#8-5）：guid 每次重启随机会让服务端风控
             // 视角下的会话环境频繁变化，加速 musickey 失效；改为首次生成后落库复用
             qq::init_guid(&conn);
@@ -302,6 +321,7 @@ fn main() {
                     serde_json::json!({ "active": false, "done": 0, "total": 0 }),
                 ),
                 dlyrics_locked: AtomicBool::new(false),
+                mini_mode: AtomicBool::new(false),
             });
 
             let mhandle = handle.clone();
