@@ -37,8 +37,12 @@ jobs:
         run: cargo test --bin rustmusic --locked
 
       - name: 构建 release exe
-        working-directory: src-tauri
-        run: cargo build --release --bin rustmusic
+        # 必须走 tauri CLI（自动追加 custom-protocol 特性把前端嵌进 exe）：
+        # 裸 cargo build --release 的产物会去连 devUrl localhost:1420，
+        # 表现为 WebView 报 ERR_CONNECTION_REFUSED（Cargo.toml [features]
+        # 注释里上游自己就警告过这一点）。--bundles none = 只出裸 exe
+        # 不打安装包
+        run: npx tauri build --bundles none
 
       - uses: actions/upload-artifact@v4
         with:
